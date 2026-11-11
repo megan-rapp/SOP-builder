@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import { ArrowRight, LoaderCircle, Mail, ShieldCheck } from "lucide-react";
+import DemoWorkspace from "./DemoWorkspace";
 import Workspace from "./Workspace";
 import { isSupabaseConfigured, supabase } from "./lib/supabase";
 
@@ -8,6 +9,7 @@ function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState("");
+  const [showDemo, setShowDemo] = useState(false);
 
   useEffect(() => {
     if (!supabase) {
@@ -33,9 +35,10 @@ function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  if (!isSupabaseConfigured || !supabase) return <SupabaseSetup />;
+  if (showDemo) return <DemoWorkspace onExit={() => setShowDemo(false)} />;
+  if (!isSupabaseConfigured || !supabase) return <SupabaseSetup onDemo={() => setShowDemo(true)} />;
   if (loading) return <div className="auth-loading"><LoaderCircle size={23} className="spin" /> Loading secure workspace…</div>;
-  if (!session?.user) return <EmailCodeSignIn client={supabase} initialError={authError} />;
+  if (!session?.user) return <EmailCodeSignIn client={supabase} initialError={authError} onDemo={() => setShowDemo(true)} />;
   const client = supabase;
   return <Workspace
     key={session.user.id}
@@ -48,7 +51,7 @@ function App() {
   />;
 }
 
-function SupabaseSetup() {
+function SupabaseSetup({ onDemo }: { onDemo: () => void }) {
   return (
     <main className="auth-shell">
       <section className="auth-card">
@@ -62,12 +65,13 @@ function SupabaseSetup() {
           <span>3</span><p>Enable email OTP and configure SMTP in Supabase Auth.</p>
         </div>
         <p className="auth-footnote">The publishable key is safe for browser use when Row Level Security is enabled. Never expose a service-role key.</p>
+        <button className="auth-demo-link" type="button" onClick={onDemo}>Explore the demo templates</button>
       </section>
     </main>
   );
 }
 
-function EmailCodeSignIn({ client, initialError }: { client: SupabaseClient; initialError: string }) {
+function EmailCodeSignIn({ client, initialError, onDemo }: { client: SupabaseClient; initialError: string; onDemo: () => void }) {
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [sent, setSent] = useState(false);
@@ -163,6 +167,7 @@ function EmailCodeSignIn({ client, initialError }: { client: SupabaseClient; ini
         {message && <p className="auth-message" role="status">{message}</p>}
         {error && <p className="auth-error" role="alert">{error}</p>}
         <div className="auth-footnote"><ShieldCheck size={14} /> Your practice documents are private to verified practice members.</div>
+        <button className="auth-demo-link" type="button" onClick={onDemo}>Explore the demo templates</button>
       </section>
     </main>
   );

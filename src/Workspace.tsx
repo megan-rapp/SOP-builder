@@ -2,8 +2,10 @@ import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import {
   Activity,
+  ArrowDown,
   ArrowDownToLine,
   ArrowLeft,
+  ArrowUp,
   ArrowUpRight,
   BookOpen,
   Check,
@@ -13,6 +15,7 @@ import {
   FileText,
   Flower2,
   FolderOpen,
+  GripVertical,
   HeartPulse,
   ImagePlus,
   LayoutDashboard,
@@ -29,6 +32,7 @@ import {
   X,
 } from "lucide-react";
 import { categories, sopTemplates, type SopTemplate } from "./data";
+import { extractSopText, parseSopText } from "./lib/importSop";
 
 const TDO_KB_URL = "https://kb.tdo4endo.com/";
 
@@ -39,12 +43,21 @@ type SopRow = { location_id: string; sop_id: string; data: SopTemplate };
 type KnowledgeLink = { id: string; title: string; url: string };
 type Invitation = { id: string; email: string; created_at: string; expires_at: string; accepted_at: string | null };
 
+function moveItem<T>(items: T[], from: number, to: number): T[] {
+  if (from === to || from < 0 || from >= items.length || to < 0 || to >= items.length) return items;
+  const reordered = [...items];
+  const [moved] = reordered.splice(from, 1);
+  reordered.splice(to, 0, moved);
+  return reordered;
+}
+
 function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseClient; onSignOut: () => Promise<void> }) {
   const [activeCategory, setActiveCategory] = useState<(typeof categories)[number]>("All procedures");
   const [query, setQuery] = useState("");
   const [activeView, setActiveView] = useState<"library" | "knowledge" | "builder" | "settings">("library");
   const [selectedSop, setSelectedSop] = useState<SopTemplate | null>(null);
   const [selectedSteps, setSelectedSteps] = useState<number[]>([]);
+  const [selectedPrerequisites, setSelectedPrerequisites] = useState<number[]>([]);
   const [workspaceSops, setWorkspaceSops] = useState<SopTemplate[]>(sopTemplates);
   const [sopRows, setSopRows] = useState<SopRow[]>([]);
   const [memberships, setMemberships] = useState<PracticeMember[]>([]);
@@ -68,7 +81,10 @@ function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseCl
   const [builderTitle, setBuilderTitle] = useState("");
   const [builderDepartment, setBuilderDepartment] = useState("");
   const [builderDescription, setBuilderDescription] = useState("");
-  const [builderSteps, setBuilderSteps] = useState(["", ""]);
+  const [builderPrerequisites, setBuilderPrerequisites] = useState<string[]>([""]);
+  const [builderSteps, setBuilderSteps] = useState([""]);
+  const [draggingPrerequisiteIndex, setDraggingPrerequisiteIndex] = useState<number | null>(null);
+  const [draggingStepIndex, setDraggingStepIndex] = useState<number | null>(null);
   const [builderLocation, setBuilderLocation] = useState("");
   const [builderScreenshot, setBuilderScreenshot] = useState("");
   const [builderScreenshotPath, setBuilderScreenshotPath] = useState("");
@@ -76,10 +92,13 @@ function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseCl
   const [builderReferenceUrl, setBuilderReferenceUrl] = useState("");
   const [builderSopId, setBuilderSopId] = useState("");
   const [builderOriginalSop, setBuilderOriginalSop] = useState<SopTemplate | null>(null);
+  const [importedSopName, setImportedSopName] = useState("");
+  const [importingSop, setImportingSop] = useState(false);
   const [linkTitle, setLinkTitle] = useState("");
   const [linkUrl, setLinkUrl] = useState("");
   const [notice, setNotice] = useState("");
   const logoInput = useRef<HTMLInputElement>(null);
+  const sopImportInput = useRef<HTMLInputElement>(null);
   const currentLocation = locations.find((location) => location.id === activeLocationId) || null;
   const role = memberships.find((membership) => membership.practice_id === practiceId)?.role;
   const canManagePractice = role === "owner" || role === "admin";
@@ -279,6 +298,7 @@ function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseCl
   function openSop(sop: SopTemplate) {
     setSelectedSop(sop);
     setSelectedSteps(sop.steps.map((_, index) => index));
+    setSelectedPrerequisites((sop.prerequisites || []).map((_, index) => index));
     setNotice("");
   }
 
@@ -287,10 +307,12 @@ function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseCl
     setActiveView("builder");
     setBuilderSopId("");
     setBuilderOriginalSop(null);
+    setImportedSopName("");
     setBuilderTitle("");
     setBuilderDepartment("");
     setBuilderDescription("");
-    setBuilderSteps(["", ""]);
+    setBuilderPrerequisites([""]);
+    setBuilderSteps([""]);
     setBuilderLocation("");
     setBuilderScreenshot("");
     setBuilderScreenshotPath("");
@@ -302,9 +324,11 @@ function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseCl
   function editSop(sop: SopTemplate) {
     setBuilderSopId(sop.id);
     setBuilderOriginalSop(sop);
+    setImportedSopName("");
     setBuilderTitle(sop.title);
     setBuilderDepartment(sop.department || "");
     setBuilderDescription(sop.description);
+    setBuilderPrerequisites([...(sop.prerequisites || [])]);
     setBuilderSteps([...sop.steps]);
     setBuilderLocation(sop.navigationPath?.join(" > ") || "");
     setBuilderScreenshot(sop.screenshot?.src || "");
@@ -314,6 +338,46 @@ function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseCl
     setSelectedSop(null);
     setActiveView("builder");
     setNotice("");
+  }
+
+  async function handleSopImport(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+    setNotice("");
+    setImportingSop(true);
+    try {
+      if (file.size > 15 * 1024 * 1024) {
+        throw new Error("Choose an SOP file smaller than 15 MB.");
+      }
+      const text = await extractSopText(file);
+      const imported = parseSopText(text, file.name);
+      if (!imported.steps.length) {
+        throw new Error("No procedure steps were found. This may be a scanned PDF; scanned documents need OCR, which is not supported yet.");
+      }
+
+      setBuilderSopId("");
+      setBuilderOriginalSop(null);
+      setImportedSopName(file.name);
+      setBuilderTitle(imported.title);
+      setBuilderDepartment("");
+      setBuilderDescription(imported.description);
+      setBuilderPrerequisites(imported.prerequisites.length ? imported.prerequisites : [""]);
+      setBuilderSteps(imported.steps);
+      setBuilderLocation("");
+      setBuilderScreenshot("");
+      setBuilderScreenshotPath("");
+      setBuilderReferenceTitle("");
+      setBuilderReferenceUrl("");
+      setSelectedSop(null);
+      setActiveView("builder");
+      setNotice(`Imported text from ${file.name}. Review and edit the fields before saving.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? `Could not import this SOP: ${error.message}` : "Could not import this SOP.");
+    } finally {
+      input.value = "";
+      setImportingSop(false);
+    }
   }
 
   function handleBuilderScreenshot(event: ChangeEvent<HTMLInputElement>) {
@@ -346,6 +410,7 @@ function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseCl
       return;
     }
     const title = builderTitle.trim();
+    const prerequisites = builderPrerequisites.map((step) => step.trim()).filter(Boolean);
     const steps = builderSteps.map((step) => step.trim()).filter(Boolean);
     const location = builderLocation.split(">").map((part) => part.trim()).filter(Boolean);
     const referenceTitle = builderReferenceTitle.trim();
@@ -408,6 +473,7 @@ function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseCl
       department: builderDepartment.trim() || undefined,
       description: builderDescription.trim() || "Custom procedure created for your practice.",
       duration: `${steps.length} steps`,
+      prerequisites: prerequisites.length ? prerequisites : undefined,
       steps,
       isCustom: builderOriginalSop?.isCustom ?? true,
       navigationPath: location.length ? location : undefined,
@@ -842,12 +908,39 @@ function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseCl
               </div>
               <div className="editor-actions">
                 {canResetSop && <button className="secondary-button" onClick={() => void runSafely(resetSopOverride, "Could not reset the inherited SOP")}><ArrowLeft size={15} /> Reset inherited</button>}
-                <button className="secondary-button" onClick={() => editSop(selectedSop)}><FileText size={15} /> Edit SOP</button>
+                <button className="secondary-button edit-steps-button" onClick={() => editSop(selectedSop)}><FileText size={15} /> Add / edit / reorder steps</button>
                 <button className="button-primary" onClick={printSop}><ArrowDownToLine size={17} /> Generate PDF</button>
               </div>
             </div>
             <div className="editor-grid">
               <section className="steps-panel">
+                {(selectedSop.prerequisites || []).length > 0 && (
+                  <div className="prerequisite-checklist">
+                    <div className="panel-heading prerequisite-heading">
+                      <div><h2>Prerequisites · one-time setup</h2><p>Complete these setup items before following this procedure.</p></div>
+                      <span className="selection-count">{selectedPrerequisites.length} of {selectedSop.prerequisites?.length || 0} selected</span>
+                    </div>
+                    <div className="step-list">
+                      {selectedSop.prerequisites?.map((step, index) => {
+                        const checked = selectedPrerequisites.includes(index);
+                        return (
+                          <label key={`prerequisite-${index}`} className={`step-row prerequisite-row ${checked ? "checked" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => setSelectedPrerequisites((current) =>
+                                checked ? current.filter((stepIndex) => stepIndex !== index) : [...current, index].sort((a, b) => a - b)
+                              )}
+                            />
+                            <span className="custom-checkbox">{checked && <Check size={13} strokeWidth={3} />}</span>
+                            <span className="step-number">{String(index + 1).padStart(2, "0")}</span>
+                            <span className="step-copy">{step}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 <div className="panel-heading">
                   <div><h2>Choose your steps</h2><p>Select the steps your practice follows.</p></div>
                   <span className="selection-count">{selectedSteps.length} of {selectedSop.steps.length} selected</span>
@@ -930,12 +1023,83 @@ function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseCl
         ) : activeView === "builder" ? (
           <section className="builder-page">
             <button className="back-link" onClick={() => setActiveView("library")}><ArrowLeft size={16} /> Back to SOP library</button>
-            <div className="page-intro builder-intro">
-              <div className="eyebrow"><span className="category-dot" /> YOUR WORKFLOW, YOUR WAY</div>
-              <h1>{builderSopId ? "Edit SOP" : "Build your own SOP"}</h1>
-              <p>{builderSopId ? "Changes are saved to this location and inherited by its child locations." : "Create a practice-specific checklist. It does not need to be TDO-related."}</p>
+            <div className="builder-intro-row">
+              <div className="page-intro builder-intro">
+                <div className="eyebrow"><span className="category-dot" /> YOUR WORKFLOW, YOUR WAY</div>
+                <h1>{builderSopId ? "Edit SOP" : "Build your own SOP"}</h1>
+                <p>{builderSopId ? "Changes are saved to this location and inherited by its child locations." : "Create a practice-specific checklist. It does not need to be TDO-related."}</p>
+              </div>
+              <div className="builder-import-action">
+                <input
+                  ref={sopImportInput}
+                  className="visually-hidden"
+                  type="file"
+                  accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                  aria-label="Upload an existing SOP file"
+                  onChange={(event) => void handleSopImport(event)}
+                />
+                <button className="secondary-button" type="button" onClick={() => sopImportInput.current?.click()} disabled={importingSop}>
+                  {importingSop ? <LoaderCircle size={15} className="spin" /> : <Upload size={15} />}
+                  {importingSop ? "Reading SOP…" : "Import existing SOP"}
+                </button>
+                <span>PDF, DOCX, or TXT · 15 MB max</span>
+              </div>
             </div>
+            {importedSopName && <p className="imported-sop-note"><FileText size={14} /> Imported from <strong>{importedSopName}</strong>. Review and edit the extracted content before saving.</p>}
             <form className="builder-form" onSubmit={(event) => void runSafely(() => saveSop(event), "Could not save this SOP")}>
+              <section className="side-card builder-section">
+                <div className="side-card-title"><span className="side-icon lavender"><BookOpen size={17} /></span><div><h3>Prerequisites · one-time setup</h3><p>List setup tasks to complete once before following this procedure.</p></div></div>
+                <div className="lms-prompt">
+                  <a className="resource-link" href="https://lms.tdos.dental/dashboard" target="_blank" rel="noreferrer">
+                    <span className="resource-mark">L</span>
+                    <span><strong>Open TDO Learning Center</strong><small>Browse lessons at lms.tdos.dental</small></span>
+                    <ArrowUpRight size={15} />
+                  </a>
+                  <p>Video-based SOP drafting is planned for a future LMS connection. For now, enter the setup and procedure steps below.</p>
+                </div>
+                <div className="builder-step-list prerequisite-builder-list">
+                  {builderPrerequisites.map((step, index) => (
+                    <div
+                      className={`builder-step-row ${draggingPrerequisiteIndex === index ? "is-dragging" : ""}`}
+                      key={`prerequisite-${index}`}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        if (event.dataTransfer.getData("application/x-sop-list") !== "prerequisites") return;
+                        const from = Number(event.dataTransfer.getData("text/plain"));
+                        setBuilderPrerequisites((current) => moveItem(current, from, index));
+                        setDraggingPrerequisiteIndex(null);
+                      }}
+                    >
+                      <button
+                        className="drag-handle"
+                        type="button"
+                        draggable
+                        aria-label={`Drag prerequisite ${index + 1} to reorder`}
+                        title="Drag to reorder"
+                        onDragStart={(event) => {
+                          setDraggingPrerequisiteIndex(index);
+                          event.dataTransfer.effectAllowed = "move";
+                          event.dataTransfer.setData("application/x-sop-list", "prerequisites");
+                          event.dataTransfer.setData("text/plain", String(index));
+                        }}
+                        onDragEnd={() => setDraggingPrerequisiteIndex(null)}
+                      ><GripVertical size={17} /><span>Drag</span></button>
+                      <div className="builder-step-content">
+                        <span className="step-number">{String(index + 1).padStart(2, "0")}</span>
+                        <input className="text-input" aria-label={`One-time prerequisite ${index + 1}`} placeholder="Describe one-time setup" value={step} onChange={(event) => setBuilderPrerequisites((current) => current.map((item, stepIndex) => stepIndex === index ? event.target.value : item))} />
+                      </div>
+                      <div className="builder-step-actions">
+                        <button className="step-action insert-step" type="button" aria-label={`Add prerequisite after ${index + 1}`} title="Add after this prerequisite" onClick={() => setBuilderPrerequisites((current) => [...current.slice(0, index + 1), "", ...current.slice(index + 1)])}><Plus size={15} /><span>Add after</span></button>
+                        <button className="step-action" type="button" aria-label={`Move prerequisite ${index + 1} up`} title="Move up" disabled={index === 0} onClick={() => setBuilderPrerequisites((current) => moveItem(current, index, index - 1))}><ArrowUp size={15} /><span>Move up</span></button>
+                        <button className="step-action" type="button" aria-label={`Move prerequisite ${index + 1} down`} title="Move down" disabled={index === builderPrerequisites.length - 1} onClick={() => setBuilderPrerequisites((current) => moveItem(current, index, index + 1))}><ArrowDown size={15} /><span>Move down</span></button>
+                        <button className="step-action remove-step" type="button" aria-label={`Remove prerequisite ${index + 1}`} title="Remove" onClick={() => setBuilderPrerequisites((current) => current.filter((_, stepIndex) => stepIndex !== index))}><X size={14} /><span>Remove</span></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <button className="add-step-button" type="button" onClick={() => setBuilderPrerequisites((current) => [...current, ""])}><Plus size={15} /> Add a prerequisite</button>
+              </section>
               <section className="side-card builder-section">
                 <div className="side-card-title"><span className="side-icon"><FileText size={17} /></span><div><h3>Procedure details</h3><p>{builderSopId ? "Changes apply to this location and are shared with locations inheriting from it." : `Saved to ${currentLocation?.name || "this location"} and inherited by its child locations.`}</p></div></div>
                 <div className="builder-fields">
@@ -955,15 +1119,47 @@ function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseCl
               </section>
               <section className="side-card builder-section">
                 <div className="panel-heading builder-steps-heading">
-                  <div><h2>Procedure steps</h2><p>Add one action per step. You can select or deselect steps before exporting.</p></div>
+                  <div><h2>Procedure steps</h2><p>Use <strong>Add after</strong> to insert a step, <strong>Move up/down</strong> or drag to reorder. Works for templates and imported SOPs.</p></div>
                   <span className="selection-count">{builderSteps.filter((step) => step.trim()).length} steps</span>
                 </div>
                 <div className="builder-step-list">
                   {builderSteps.map((step, index) => (
-                    <div className="builder-step-row" key={index}>
-                      <span className="step-number">{String(index + 1).padStart(2, "0")}</span>
-                      <input className="text-input" aria-label={`Procedure step ${index + 1}`} placeholder={`Describe step ${index + 1}`} value={step} onChange={(event) => setBuilderSteps((current) => current.map((item, stepIndex) => stepIndex === index ? event.target.value : item))} />
-                      <button className="icon-button remove-step" type="button" aria-label={`Remove step ${index + 1}`} onClick={() => setBuilderSteps((current) => current.length > 1 ? current.filter((_, stepIndex) => stepIndex !== index) : [""])}><X size={15} /></button>
+                    <div
+                      className={`builder-step-row ${draggingStepIndex === index ? "is-dragging" : ""}`}
+                      key={index}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        if (event.dataTransfer.getData("application/x-sop-list") !== "steps") return;
+                        const from = Number(event.dataTransfer.getData("text/plain"));
+                        setBuilderSteps((current) => moveItem(current, from, index));
+                        setDraggingStepIndex(null);
+                      }}
+                    >
+                      <button
+                        className="drag-handle"
+                        type="button"
+                        draggable
+                        aria-label={`Drag step ${index + 1} to reorder`}
+                        title="Drag to reorder"
+                        onDragStart={(event) => {
+                          setDraggingStepIndex(index);
+                          event.dataTransfer.effectAllowed = "move";
+                          event.dataTransfer.setData("application/x-sop-list", "steps");
+                          event.dataTransfer.setData("text/plain", String(index));
+                        }}
+                        onDragEnd={() => setDraggingStepIndex(null)}
+                      ><GripVertical size={17} /><span>Drag</span></button>
+                      <div className="builder-step-content">
+                        <span className="step-number">{String(index + 1).padStart(2, "0")}</span>
+                        <input className="text-input" aria-label={`Procedure step ${index + 1}`} placeholder={`Describe step ${index + 1}`} value={step} onChange={(event) => setBuilderSteps((current) => current.map((item, stepIndex) => stepIndex === index ? event.target.value : item))} />
+                      </div>
+                      <div className="builder-step-actions">
+                        <button className="step-action insert-step" type="button" aria-label={`Add step after ${index + 1}`} title="Add after this step" onClick={() => setBuilderSteps((current) => [...current.slice(0, index + 1), "", ...current.slice(index + 1)])}><Plus size={15} /><span>Add after</span></button>
+                        <button className="step-action" type="button" aria-label={`Move step ${index + 1} up`} title="Move up" disabled={index === 0} onClick={() => setBuilderSteps((current) => moveItem(current, index, index - 1))}><ArrowUp size={15} /><span>Move up</span></button>
+                        <button className="step-action" type="button" aria-label={`Move step ${index + 1} down`} title="Move down" disabled={index === builderSteps.length - 1} onClick={() => setBuilderSteps((current) => moveItem(current, index, index + 1))}><ArrowDown size={15} /><span>Move down</span></button>
+                        <button className="step-action remove-step" type="button" aria-label={`Remove step ${index + 1}`} title="Remove" onClick={() => setBuilderSteps((current) => current.length > 1 ? current.filter((_, stepIndex) => stepIndex !== index) : [""])}><X size={14} /><span>Remove</span></button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1157,6 +1353,12 @@ function Workspace({ user, client, onSignOut }: { user: User; client: SupabaseCl
           <h1>{selectedSop.title}</h1>
           <p className="print-description">{selectedSop.description}</p>
           <div className="print-meta"><span>DEPARTMENT <b>{selectedSop.department || selectedSop.category}</b></span><span>VERSION <b>1.0</b></span><span>REVIEWED <b>________________</b></span></div>
+          {(selectedSop.prerequisites || []).some((_, index) => selectedPrerequisites.includes(index)) && (
+            <section className="print-prerequisites">
+              <h2>PREREQUISITES · ONE-TIME SETUP</h2>
+              <ol>{selectedSop.prerequisites?.map((step, index) => selectedPrerequisites.includes(index) && <li key={`prerequisite-${index}`}>{step}</li>)}</ol>
+            </section>
+          )}
           {(selectedSop.navigationPath || selectedSop.screenshot) && (
             <section className="print-navigation">
               <h2>{selectedSop.navigationPath ? "WHERE TO FIND THIS SETTING" : "PROCEDURE SCREENSHOT"}</h2>
