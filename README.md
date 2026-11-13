@@ -22,7 +22,7 @@ Copy `.env.example` to `.env.local` and add the Supabase project URL and publish
 
 The first verified user creates a practice and its first location. Practice admins can invite staff by email; invitees receive a 6-digit code and join the practice after verifying their address. Admins can add locations and select a source location to inherit its SOPs. Inherited SOP changes flow through until a location saves its own override. Practice name and logo are shared; each location's name and optional address are added to exported PDFs.
 
-The sign-in screen includes an unauthenticated demo with sample patient registration, appointment reminders, check-in, insurance entry, estimate sharing, and checkout SOPs. Demo selections can be printed but are not saved.
+The sign-in screen includes a full unauthenticated demo workspace with the SOP library and category navigation, editable templates, Build Your Own, PDF/DOCX/TXT import, TDO Knowledge Base and LMS links, and print-to-PDF. Demo edits and selections are temporary and are not saved after leaving the demo.
 
 SOPs support optional one-time prerequisites, which appear before the procedure steps in the generated PDF. Procedure and prerequisite lists can be reordered by dragging and can have blank items inserted after any step. The builder links to the TDO Learning Center; automatic drafting from LMS video content is not connected yet and requires a future LMS integration.
 
